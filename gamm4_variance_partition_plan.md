@@ -1,82 +1,64 @@
 # Plan: `gamm4` Integration for Variance Partitioning and Hypothesis Testing
 
-## Clarifying Questions
-1. **Parallelization:** Should the `gamm4_dream` function include built-in support for parallel processing (e.g., using `BiocParallel` or `future`), or will you handle the iteration outside the function?
-
-Response: BiocParallel is good.
-
-2. **Multiple Smooths:** Do you anticipate models with multiple smooth terms (e.g., `s(Age) + s(Time)`), or should we optimize for the single-spline case?
-
-Response: If possible, please allow for multiple smooths, but if overly complicated, you can default to a single smooth.
-
-3. **Contrast Handling:** In `dream`, contrasts are often used to compare groups (e.g., `GroupA - GroupB`). For GAMs, hypothesis testing usually focuses on the significance of the smooth term or specific linear coefficients. Do you need a formal contrast matrix interface, or is extracting standard coefficients/p-values sufficient?
-
-Response: Let's leave out the contrast matrix for now and focus on the smooth terms and fixed effects.
-
-4. **Data Scale:** Is the input expression data expected to be log-transformed (e.g., log2CPM) or raw counts? (Standard `dream` logic assumes log-transformed or `voom` data).
-
-Response: The data is expected to be log-transformed (e.g., log2CPM), with VoomWeights, so we can use the `voom` logic from `dream`. You may find it helpful to clone https://github.com/GabrielHoffman/variancePartition/tree/devel/R and review the code. If possible, I would something like VoomWithDreamWeights that allows for smooth terms in the model fitting.
-
-5. **Output Structure:** For the "single table for hypothesis testing," should it include results for all terms in the model for every gene, or just the primary effect of interest?
-
-Response: It should include results for terms of interest. These will be specified ahead of time. I would slightly like to diverge from the logic in variance Partition and focus on developing a first function that fits the models and then a second function that extracts the results (either variance partition or hypothesis tests) in a way that is more akin to the lmFit, eBayes approach of Limma - https://github.com/cran/limma
-
----
-
 ## 1. Overview
-The goal is to create a "drop-in" suite of R functions that extend the `variancePartition` workflow to support `gamm4`. This will allow for non-linear modeling of covariates (like Age) while still performing rigorous variance partitioning and hypothesis testing across thousands of genes.
+The goal is to create a "drop-in" suite of R functions that extend the `variancePartition` workflow to support `gamm4`. This will allow for non-linear modeling of covariates (like Age) while still performing rigorous variance partitioning and hypothesis testing across thousands of genes. The workflow will mirror the `limma` approach: **Weight Estimation -> Model Fitting -> Result Extraction**.
 
-## 2. Proposed Function Suite
+## 2. Updated Function Suite
 
-### A. `gamm4_dream(exprObj, formula, random_effects, data, ...)`
-This is the core engine, mimicking `variancePartition::dream`.
-- **Input:** 
-  - `exprObj`: Gene expression matrix (genes as rows, samples as columns).
-  - `formula`: The fixed effects and smooth terms (e.g., `~ s(Age)`).
-  - `random_effects`: The random effects formula (e.g., `~ (1|Subject)`).
-  - `data`: Metadata data frame.
+### A. `voomWithGamm4Weights(counts, formula, random_effects, data, ...)`
+A `gamm4`-aware version of `voomWithDreamWeights`.
 - **Action:** 
-  - Fits a `gamm4` model for every gene.
-  - Returns a `gamm4_ModelList` object (a list of `gamm4` results with custom class attributes).
+  - Converts counts to log2CPM.
+  - Fits `gamm4` models to estimate the mean-variance relationship, accounting for smooth terms and random effects.
+  - Calculates precision weights based on the residual variance and a loess-fitted trend.
+- **Output:** An `EList` object with precision weights, compatible with downstream fitting.
 
-### B. `gamm4_topTable(modelList, coef = NULL, number = Inf)`
-Mimics `limma::topTable` for the GAMM context.
-- **Action:** 
-  - Iterates through the model list.
-  - Extracts p-values, effective degrees of freedom (edf), and coefficients from the `gam` portion of each model.
-  - For splines, it will report the `s.table` statistics. For linear terms, it will report `p.table` statistics.
-- **Output:** A single data frame containing testing results for all genes.
+### B. `gamm4_dream(exprObj, formula, random_effects, data, BPPARAM = SerialParam(), ...)`
+The core fitting engine, mimicking `limma::lmFit` / `variancePartition::dream`.
+- **Features:** 
+  - **Parallelization:** Uses `BiocParallel` for efficient processing across genes.
+  - **Flexibility:** Supports multiple smooth terms (e.g., `~ s(Age) + s(Time)`) and linear fixed effects.
+  - **Weights:** Automatically utilizes precision weights if `exprObj` is an `EList`.
+- **Output:** A `gamm4_ModelList` object.
 
-### C. `gamm4_varPart(modelList, spline_var = "Age", combine_age = TRUE)`
-Mimics `variancePartition::extractVarPart`.
+### C. `gamm4_topTable(modelList, coefs = NULL, smooths = NULL, number = Inf)`
+Extracts hypothesis testing results, mimicking `limma::topTable`.
 - **Action:** 
-  - Implements the "Realized Predictions" logic: `var(Xb)` for fixed effects and `var(Zu)` for random effects.
-  - Specifically handles `gamm4` splines by combining the linear component (from `mer` fixed effects) and the non-linear component (from `mer` random effects) into a single "Total Variance" for the variable.
-- **Output:** A data frame where rows are genes and columns are variance components (percentages).
+  - Extracts statistics for specified terms of interest.
+  - For **Fixed Effects** (`coefs`): Reports coefficients, t-statistics, and p-values from the `gam` summary.
+  - For **Smooth Terms** (`smooths`): Reports Effective Degrees of Freedom (EDF) and p-values.
+- **Output:** A single data frame with results for all genes.
+
+### D. `gamm4_extractVarPart(modelList, spline_vars = "Age")`
+Calculates variance partitioning, mimicking `variancePartition::extractVarPart`.
+- **Logic:** Uses "Realized Predictions" to compare fixed and random effects on the same scale.
+- **Spline Handling:** Automatically combines the linear component (fixed) and non-linear component (random) for each spline variable into a single "Total Variance" contribution.
+- **Output:** A data frame of variance percentages.
 
 ---
 
-## 3. Implementation Logic (Based on Prototyping)
+## 3. Implementation Logic
 
 ### Variance Decomposition
-To ensure fixed and random effects are comparable, we will calculate the variance of the fitted values for each component:
+We calculate the variance of the fitted values for each component to ensure comparability:
 1. **Fixed Effects:** $Var(X \hat{\beta})$
 2. **Random Effects:** $Var(Z \hat{u})$
 3. **Splines:** $Var(X_{spline} \hat{\beta}_{spline} + Z_{spline} \hat{u}_{spline})$
-4. **Residuals:** $\sigma^2$
+4. **Residuals:** $\sigma^2$ (residual variance)
 
 ### Hypothesis Testing
-We will leverage the `summary.gam()` output from `mgcv`. This provides:
-- **Approximate p-values** for smooth terms based on the Bayesian posterior covariance matrix.
-- **Linear coefficients** for global trend determination (e.g., is the gene overall increasing or decreasing with Age?).
+We leverage `mgcv::summary.gam()` for robust inference:
+- **P-values:** Based on the Bayesian posterior covariance matrix, which accounts for the smoothing penalty.
+- **Directionality:** Extracted from the linear component of the spline for global trend assessment.
 
 ---
 
 ## 4. Integration & Testing Plan
 
-1. **Development:** Create a single R script (e.g., `gamm4_varpart_utils.R`) containing the three functions.
+1. **Development:** Create `gamm4_varpart_utils.R`.
 2. **Validation:** 
-   - Use the simulated data from `prototyping/varpart_gamm4_exploration.Rmd` to ensure the functions recover the expected proportions (e.g., Gene 1 should show high linear Age variance, Gene 2 high non-linear Age variance, Gene 3 high Subject variance).
-   - Compare `gamm4_topTable` results against a standard linear `dream` fit for linear-only scenarios.
-3. **Deployment:** Provide instructions to source this utility script in:
-   `/Users/nicholasrachmaninoff/Library/CloudStorage/GoogleDrive-nrachman.bio@gmail.com/My Drive/nicaragua_paper_include_single_cell/2024_04_02_bulk/Nicaragua_immune_intrinsicness_bulk/scripts/variancePartition/run_varpart`
+   - Verify `voomWithGamm4Weights` correctly captures the mean-variance trend in simulated count data.
+   - Use the 3-gene simulation (Linear, Non-linear, Subject-heavy) to validate `gamm4_extractVarPart`.
+   - Ensure `gamm4_topTable` correctly identifies significant smooth effects.
+3. **Deployment:** Source the utility script in the user's project directory.
+4. **Git:** Commit and push the updated plan and implementation.
