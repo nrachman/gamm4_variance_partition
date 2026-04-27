@@ -53,12 +53,19 @@ We leverage `mgcv::summary.gam()` for robust inference:
 
 ---
 
-## 4. Integration & Testing Plan
+## 4. Integration & Validation Plan
 
-1. **Development:** Create `gamm4_varpart_utils.R`.
-2. **Validation:** 
-   - Verify `voomWithGamm4Weights` correctly captures the mean-variance trend in simulated count data.
-   - Use the 3-gene simulation (Linear, Non-linear, Subject-heavy) to validate `gamm4_extractVarPart`.
-   - Ensure `gamm4_topTable` correctly identifies significant smooth effects.
-3. **Deployment:** Source the utility script in the user's project directory.
-4. **Git:** Commit and push the updated plan and implementation.
+### Phase 1: Numerical Consistency
+1. **Linear Benchmarking:** Run `gamm4_dream` on a model with only linear terms (e.g., `~ Age + (1|Subject)`) and compare p-values and variance components directly against `variancePartition::dream`. The results should be nearly identical.
+2. **Spline Recovery:** Use the 3-gene simulation (Linear, Non-linear, Subject-heavy) to ensure the `gamm4` logic correctly partitions variance to the spline component when non-linearity is present.
+
+### Phase 2: Biological Case Study
+To validate the pipeline on real-world data, we will use one of the following publicly available longitudinal RNA-seq datasets:
+- **Option A (The "Standard"):** `variancePartition::varPartData`. This is the internal simulated dataset used in the `dream` vignettes. It provides a controlled baseline for Subject and Tissue effects.
+- **Option B (Immunology):** **GSE115828**. A high-quality longitudinal study of human influenza vaccine response (Multiple timepoints per Subject). Ideal for testing `s(Time) + (1|Subject)`.
+- **Option C (Infection):** **GSE153873**. Longitudinal RNA-seq in COVID-19 patients across different levels of severity. Captures complex temporal dynamics and high inter-subject variability.
+
+### Phase 3: Deployment
+1. **Scripting:** Finalize `gamm4_varpart_utils.R`.
+2. **Source:** Provide instructions to source the script in the user's project directory.
+3. **Git:** Commit and push the final code and validation report.
