@@ -62,8 +62,8 @@ We leverage `mgcv::summary.gam()` for robust inference:
 ### Phase 2: Biological Case Study
 To validate the pipeline on real-world data, we will use one of the following publicly available longitudinal RNA-seq datasets:
 - **Option A (The "Standard"):** `variancePartition::varPartData`. This is the internal simulated dataset used in the `dream` vignettes. It provides a controlled baseline for Subject and Tissue effects.
-- **Option B (Immunology):** **GSE115828**. A high-quality longitudinal study of human influenza vaccine response (Multiple timepoints per Subject). Ideal for testing `s(Time) + (1|Subject)`.
-- **Option C (Infection):** **GSE153873**. Longitudinal RNA-seq in COVID-19 patients across different levels of severity. Captures complex temporal dynamics and high inter-subject variability.
+- **Option B (Aging/Lifespan):** **GSE179848**. A comprehensive longitudinal RNA-seq dataset tracking primary human fibroblasts across their replicative lifespan (multiple timepoints per donor). Ideal for testing `s(Time) + (1|Subject)`.
+- **Option C (Vaccine/Immune):** **GSE214546**. Longitudinal multi-omic (including RNA-seq) immune profiling of healthy adults followed over two years with yearly vaccinations.
 
 ### Phase 3: Deployment
 1. **Scripting:** Finalize `gamm4_varpart_utils.R`.
