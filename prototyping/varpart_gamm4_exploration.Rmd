@@ -1,0 +1,302 @@
+---
+title: "Variance Partitioning with gamm4 Exploration"
+author: "Nicholas Rachmaninoff"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Variance Partitioning: Realized vs. Raw Parameters
+
+This document explores variance partitioning for Generalized Additive Mixed Models (GAMMs) using `gamm4`. When calculating how much variance each component (e.g., Age, Subject) explains, there are two common approaches:
+
+1.  **Raw Variance Parameters ($\sigma^2$):** These are the estimated variances of the underlying distributions from which the random effects are drawn. While they describe the model's structure, they don't always directly reflect the variation contributed to the *specific* data points in your sample.
+2.  **Realized Predictions ($var(Zu)$ and $var(X\beta)$):** This approach calculates the actual variance of the fitted values contributed by each component. 
+    *   For fixed effects, we use the variance of the linear predictor: $var(X\beta)$.
+    *   For random effects (including splines in `gamm4`), we use the variance of the realized predictions: $var(Zu)$.
+
+### Why Realized Predictions are Preferred:
+*   **Scale Consistency:** It puts fixed and random effects on the same scale. Fixed effects don't have a "variance parameter" in the same way random effects do, so calculating the variance of the predictions is the only way to compare them fairly.
+*   **Sample Specificity:** It measures how much variation a component actually explains in your *current* dataset, rather than predicting the variation in a hypothetical infinite population.
+*   **Additive Decomposition:** In many cases, the variance of the sum of these components (plus residuals) more closely approximates the total variance of the observed data, making the "Percentage Explained" much more intuitive.
+
+# 1. Setup and Package Loading
+
+```{r setup, message=FALSE, warning=FALSE}
+library(lme4)
+library(gamm4)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+
+set.seed(123)
+```
+
+# 2. Simulate the Three Gene Scenarios
+
+```{r simulate_data}
+n_subj <- 30
+n_timepoints <- 8
+
+subjects <- data.frame(
+  Subject = factor(paste0("S", sprintf("%02d", 1:n_subj))),
+  Start_Age = runif(n_subj, 20, 65),
+  Subj_Eff_Small = rnorm(n_subj, 0, 2),
+  Subj_Eff_Large = rnorm(n_subj, 0, 15)
+)
+
+df <- expand.grid(Subject = subjects$Subject, Timepoint = 1:n_timepoints)
+df <- left_join(df, subjects, by = "Subject")
+df$Age <- df$Start_Age + (df$Timepoint * 1.5) + rnorm(nrow(df), 0, 0.2)
+
+# Gene 1: Linear
+df$Gene1_Linear <- 0.8 * df$Age + df$Subj_Eff_Small + rnorm(nrow(df), 0, 4)
+
+# Gene 2: Non-Linear (Sinusoidal)
+df$Gene2_NonLinear <- 15 * sin(df$Age / 6) + df$Subj_Eff_Small + rnorm(nrow(df), 0, 4)
+
+# Gene 3: Subject Heavy
+df$Gene3_SubjectHeavy <- 0.05 * df$Age + df$Subj_Eff_Large + rnorm(nrow(df), 0, 4)
+
+df_long <- df %>%
+  pivot_longer(cols = starts_with("Gene"), names_to = "Gene", values_to = "Expression") %>%
+  mutate(Gene = factor(Gene, levels = c("Gene1_Linear", "Gene2_NonLinear", "Gene3_SubjectHeavy")))
+```
+
+# 3. Visualize the Simulated Data
+
+```{r visualize_data, fig.width=10, fig.height=8}
+p_age <- ggplot(df_long, aes(x = Age, y = Expression)) +
+  geom_point(aes(color = Subject), alpha = 0.4) +
+  geom_line(aes(group = Subject, color = Subject), alpha = 0.2) +
+  geom_smooth(method = "loess", color = "black", se = FALSE, linewidth = 1.2) +
+  facet_wrap(~Gene, scales = "free_y", ncol = 1) +
+  theme_bw() + theme(legend.position = "none")
+
+p_subj <- ggplot(df_long, aes(x = reorder(Subject, Expression, median), y = Expression, fill = Subject)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  facet_wrap(~Gene, scales = "free_y", ncol = 1) +
+  theme_bw() + theme(legend.position = "none", axis.text.x = element_blank())
+
+p_age | p_subj
+```
+
+# 4. Robust Variance Partition Function
+
+```{r vp_function}
+calc_vp_gamm <- function(model, spline_var = "Age", combine_age = TRUE) {
+  
+  # Robustly extract the lmerMod object from gamm4 result
+  if (inherits(model, "gamm4")) {
+    mer_obj <- model[[1]]
+  } else if (is.list(model) && "mer" %in% names(model)) {
+    mer_obj <- model$mer
+    if (inherits(mer_obj, "gamm4")) mer_obj <- mer_obj[[1]]
+  } else {
+    mer_obj <- model
+  }
+  
+  # 1. Fixed Effects Variance: var(X * beta)
+  X <- getME(mer_obj, "X")
+  beta <- fixef(mer_obj)
+  fe_vars <- numeric()
+  for (colname in colnames(X)) {
+    if (colname != "X(Intercept)") {
+      term_pred <- as.numeric(X[, colname, drop = FALSE] %*% beta[colname])
+      fe_vars[colname] <- var(term_pred)
+    }
+  }
+  
+  # 2. Random Effects Variance: var(Z * b)
+  # We use getME('Gp') to identify which columns of Z correspond to which random effect
+  Z <- getME(mer_obj, "Z")
+  b <- getME(mer_obj, "b")
+  gp <- getME(mer_obj, "Gp")
+  names_re <- names(ranef(mer_obj))
+  
+  re_vars <- numeric()
+  for (i in seq_along(names_re)) {
+    start <- gp[i] + 1
+    end <- gp[i+1]
+    Z_grp <- Z[, start:end, drop = FALSE]
+    b_grp <- b[start:end]
+    pred_grp <- as.numeric(Z_grp %*% b_grp)
+    re_vars[names_re[i]] <- var(pred_grp)
+  }
+  
+  # 3. Residuals
+  var_resid <- sigma(mer_obj)^2
+  
+  # 4. Handle Spline Combination Logic
+  # gamm4 names linear fixed effect as Xs(Age)Fx1
+  spline_fixed_name <- paste0("Xs(", spline_var, ")Fx1")
+  
+  linear_var <- fe_vars[spline_fixed_name]
+  if (is.null(linear_var) || length(linear_var) == 0 || is.na(linear_var)) linear_var <- 0
+  
+  nonlinear_var <- re_vars["Xr"]
+  if (is.null(nonlinear_var) || length(nonlinear_var) == 0 || is.na(nonlinear_var)) nonlinear_var <- 0
+  
+  # Prepare final components
+  # Remove the specific age parts from the general lists to avoid double counting
+  fe_vars_other <- fe_vars[names(fe_vars) != spline_fixed_name]
+  re_vars_other <- re_vars[names(re_vars) != "Xr"]
+  
+  other_fe_var <- sum(fe_vars_other)
+  
+  final_vars <- numeric()
+  
+  # Add other random effects (like Subject)
+  if (length(re_vars_other) > 0) {
+    for (nm in names(re_vars_other)) {
+      final_vars[nm] <- re_vars_other[nm]
+    }
+  }
+  
+  if (combine_age) {
+    final_vars["Age (Total)"] <- linear_var + nonlinear_var
+  } else {
+    final_vars["Age (Linear)"] <- linear_var
+    final_vars["Age (Non-linear)"] <- nonlinear_var
+  }
+  
+  if (other_fe_var > 0) {
+    final_vars["Other (Fixed)"] <- other_fe_var
+  }
+  
+  final_vars["Residuals"] <- var_resid
+  
+  # 5. Calculate Percentages
+  total_var <- sum(final_vars, na.rm = TRUE)
+  
+  res <- data.frame(
+    Component = names(final_vars),
+    Variance = unname(final_vars)
+  ) %>%
+    mutate(Pct_Explained = (Variance / total_var) * 100) %>%
+    arrange(desc(Pct_Explained))
+  
+  return(res)
+}
+```
+
+# 5. Fit Models and Partition Variance
+
+```{r fit_models, message=FALSE}
+genes <- c("Gene1_Linear", "Gene2_NonLinear", "Gene3_SubjectHeavy")
+results_list <- list()
+
+for (g in genes) {
+  # Fit Model
+  fmla <- as.formula(paste(g, "~ s(Age, bs = 'cr')"))
+  fit <- gamm4(fmla, random = ~(1|Subject), data = df)
+  
+  # Partition (Separated)
+  vp_sep <- calc_vp_gamm(fit, spline_var = "Age", combine_age = FALSE)
+  vp_sep$Gene <- g
+  vp_sep$Type <- "Separated"
+  
+  # Partition (Combined)
+  vp_comb <- calc_vp_gamm(fit, spline_var = "Age", combine_age = TRUE)
+  vp_comb$Gene <- g
+  vp_comb$Type <- "Combined"
+  
+  results_list[[paste0(g, "_sep")]] <- vp_sep
+  results_list[[paste0(g, "_comb")]] <- vp_comb
+}
+
+# Bind all results together
+df_results <- bind_rows(results_list)
+```
+
+# 6. Compare the Results
+
+```{r compare_results, fig.width=10, fig.height=10}
+# Plot 1: Separated Components
+p_sep <- df_results %>%
+  filter(Type == "Separated") %>%
+  ggplot(aes(x = Gene, y = Pct_Explained, fill = Component)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", alpha = 0.9) +
+  scale_fill_brewer(palette = "Set2") +
+  theme_minimal(base_size = 14) +
+  labs(title = "Variance Partitioning: Separated Age Effects", y = "% Variance")
+
+# Plot 2: Combined Components
+p_comb <- df_results %>%
+  filter(Type == "Combined") %>%
+  ggplot(aes(x = Gene, y = Pct_Explained, fill = Component)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", alpha = 0.9) +
+  scale_fill_manual(values = c("Age (Total)" = "#fc8d62", "Subject" = "#8da0cb", "Residuals" = "#e78ac3")) +
+  theme_minimal(base_size = 14) +
+  labs(title = "Variance Partitioning: Combined Age Effects", y = "% Variance")
+
+p_sep / p_comb
+```
+
+# 7. Hypothesis Testing and Covariate Integration
+
+A major advantage of using `gamm4` is that it provides a "dual-purpose" model. While we used the `mer` (Mixed Effects) part for variance partitioning, the `gam` (Generalized Additive Model) part is perfectly suited for hypothesis testing and p-value extraction, similar to the `dream` function in `variancePartition`.
+
+### Why this framework is powerful:
+*   **Integrated Workflow:** You fit a single model and use it for both variance partitioning (via `mer`) and inference (via `gam`).
+*   **Complex Designs:** You can easily add other numeric or categorical covariates (e.g., `Sex`, `Treatment`, `BMI`) to the formula: `y ~ s(Age) + Sex + BMI`.
+*   **Flexible Hypothesis Testing:** The `summary(fit$gam)` provides p-values for both the non-linear smooth terms and any linear fixed effects.
+
+### Testing for Directionality (Increasing vs. Decreasing)
+While splines can be non-monotonic, we often want to know the "overall" trend. Because `gamm4` decomposes the spline into a linear fixed effect and a non-linear random effect, we can use the sign of the linear coefficient to determine the global direction of the relationship.
+
+```{r hypothesis_testing}
+# Let's perform a test on all three simulated genes
+test_genes <- c("Gene1_Linear", "Gene2_NonLinear", "Gene3_SubjectHeavy")
+test_results <- list()
+
+for (g in test_genes) {
+  # Add a dummy covariate
+  df$Group <- factor(rep(c("A", "B"), length.out = nrow(df)))
+  
+  # By using s(Subject, bs = 're') inside the formula instead of the 'random' argument,
+  # the GAM summary will provide a p-value testing if the subject-level variance is non-zero.
+  fmla <- as.formula(paste(g, "~ s(Age, bs = 'cr') + Group + s(Subject, bs = 're')"))
+  fit <- gamm4(fmla, data = df)
+  
+  # # Print the summary for each gene to see the detailed stats
+  # cat("\n\n--- Hypothesis Testing Summary for", g, "---\n")
+  # print(summary(fit$gam))
+  
+  # 1. Extract P-values
+  gam_sum <- summary(fit$gam)
+  age_p <- gam_sum$s.table["s(Age)", "p-value"]
+  subj_p <- gam_sum$s.table["s(Subject)", "p-value"]
+  group_p <- gam_sum$p.table["GroupB", "Pr(>|t|)"]
+  
+  # 2. Determine Directionality
+  lin_coef <- fixef(fit$mer)[paste0("Xs(", "Age", ")Fx1")]
+  direction <- if(lin_coef > 0) "Increasing" else "Decreasing"
+  
+  test_results[[g]] <- data.frame(
+    Gene = g,
+    Age_Pval = age_p,
+    Subj_Pval = subj_p,
+    Group_Pval = group_p,
+    Linear_Slope = lin_coef,
+    Trend = direction
+  )
+}
+
+# Display Table
+bind_rows(test_results) %>%
+  knitr::kable(digits = 4, caption = "Hypothesis Testing Results (including Subject Random Effect P-values)")
+```
+
+
+This approach allows you to standardize your pipeline: the same model used to calculate that "Age explains 40% of the variance" also tells you that "Age is significantly increasing with a p-value of 1e-10."
+
+Example of gam summaries
+```{r}
+gam_sum
+
+```
+
+
+
+
