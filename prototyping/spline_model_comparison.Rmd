@@ -1,0 +1,277 @@
+---
+title: "Spline Model Comparison: Linear vs Natural Splines vs Penalized Splines"
+author: "Variance Partition Development"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Overview
+
+This document explores the differences between three modeling strategies for longitudinal RNA-seq data:
+1.  **Linear Mixed Models (`lmer` with linear terms):** Assumes a strictly linear relationship.
+2.  **Unpenalized Natural Splines (`lmer` with `ns(df=3)`):** Allows for non-linearity but uses a fixed degree of flexibility, risking overfitting on purely linear data.
+3.  **Penalized Smoothing Splines (`gamm4` with `s(bs='cr')`):** Automatically tunes the degrees of freedom to prevent overfitting, but is computationally intensive.
+
+We will simulate 6 genes with different biological trajectories, fit all three models, compare the fitted curves, extract hypothesis testing p-values, and compare variance partitioning results.
+
+```{r setup, message=FALSE, warning=FALSE}
+library(lme4)
+library(lmerTest)
+library(gamm4)
+library(splines)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+library(knitr)
+
+set.seed(42)
+```
+
+# 1. Simulate Data
+
+We simulate 30 subjects sampled over 8 timepoints. 
+We generate 6 distinct gene expression profiles to stress-test the models:
+*   **Gene 1 (Linear):** A strict straight-line relationship.
+*   **Gene 2 (One Bend):** A U-shape or inverted U-shape.
+*   **Gene 3 (Complex Wave):** A sine wave (highly non-linear).
+*   **Gene 4 (Flat/Null):** No relationship with age, pure noise.
+*   **Gene 5 (Sharp Step):** A sudden change in expression at age 40.
+*   **Gene 6 (High Frequency):** Rapid fluctuations that exceed 3 degrees of freedom.
+
+```{r simulate_data}
+n_subj <- 30
+n_timepoints <- 8
+
+subjects <- data.frame(
+  Subject = factor(paste0("S", sprintf("%02d", 1:n_subj))),
+  Start_Age = runif(n_subj, 20, 60),
+  Subj_Eff = rnorm(n_subj, 0, 2)
+)
+
+df <- expand.grid(Subject = subjects$Subject, Timepoint = 1:n_timepoints)
+df <- left_join(df, subjects, by = "Subject")
+df$Age <- df$Start_Age + (df$Timepoint * 2) + rnorm(nrow(df), 0, 0.5)
+
+# Gene 1: Strictly Linear
+df$Gene1_Linear <- 0.5 * df$Age + df$Subj_Eff + rnorm(nrow(df), 0, 3)
+
+# Gene 2: One Bend (Inverted U-shape)
+df$Gene2_OneBend <- -0.02 * (df$Age - 50)^2 + df$Subj_Eff + rnorm(nrow(df), 0, 3)
+
+# Gene 3: Highly Non-linear (Sine wave)
+df$Gene3_Complex <- 10 * sin(df$Age / 5) + df$Subj_Eff + rnorm(nrow(df), 0, 3)
+
+# Gene 4: Flat (Null - no age effect)
+df$Gene4_Flat <- 0 * df$Age + df$Subj_Eff + rnorm(nrow(df), 0, 3)
+
+# Gene 5: Sharp Step (e.g. sudden drop at age 40)
+df$Gene5_Step <- ifelse(df$Age > 40, -5, 5) + df$Subj_Eff + rnorm(nrow(df), 0, 3)
+
+# Gene 6: High Frequency (Multiple bends, underfit by df=3)
+df$Gene6_HighFreq <- 8 * sin(df$Age / 3) + 4 * cos(df$Age / 2) + df$Subj_Eff + rnorm(nrow(df), 0, 3)
+
+df_long <- pivot_longer(df, cols = starts_with("Gene"), names_to = "Gene", values_to = "Expression")
+```
+
+# 2. Fit Models and Predict
+
+```{r fit_models, message=FALSE, warning=FALSE}
+genes <- c("Gene1_Linear", "Gene2_OneBend", "Gene3_Complex", "Gene4_Flat", "Gene5_Step", "Gene6_HighFreq")
+test_results <- list()
+plot_data <- list()
+models_cache <- list() # Save models for variance partitioning
+
+# Create a dense grid of Age for smooth prediction lines (ignoring Subject variation)
+grid <- data.frame(Age = seq(min(df$Age), max(df$Age), length.out=200))
+
+for (g in genes) {
+  # Formulas
+  f_null <- as.formula(paste(g, "~ 1 + (1|Subject)"))
+  f_lin  <- as.formula(paste(g, "~ Age + (1|Subject)"))
+  f_ns   <- as.formula(paste(g, "~ ns(Age, df=3) + (1|Subject)"))
+  f_gam  <- as.formula(paste(g, "~ s(Age, bs='cr')"))
+  
+  # Fits (Using REML=FALSE for valid Likelihood Ratio Tests of fixed effects)
+  fit_null <- lmer(f_null, data=df, REML=FALSE)
+  fit_lin  <- lmer(f_lin, data=df, REML=FALSE)
+  fit_ns   <- lmer(f_ns, data=df, REML=FALSE)
+  fit_gam  <- gamm4(f_gam, random = ~(1|Subject), data=df, REML=FALSE)
+  
+  models_cache[[g]] <- list(lin = fit_lin, ns = fit_ns, gam = fit_gam)
+  
+  # Hypothesis Tests
+  pval_lin <- anova(fit_null, fit_lin)$`Pr(>Chisq)`[2]
+  pval_ns <- anova(fit_null, fit_ns)$`Pr(>Chisq)`[2]
+  pval_gam <- summary(fit_gam$gam)$s.table["s(Age)", "p-value"]
+  
+  test_results[[g]] <- data.frame(
+    Gene = g,
+    Pval_Linear = pval_lin,
+    Pval_NS_df3 = pval_ns,
+    Pval_GAM = pval_gam
+  )
+  
+  # Predictions for plotting (marginalizing over Subject, setting random effect to 0)
+  grid$Pred_Linear <- predict(fit_lin, newdata=grid, re.form=NA)
+  grid$Pred_NS_df3 <- predict(fit_ns, newdata=grid, re.form=NA)
+  grid$Pred_GAM <- predict(fit_gam$gam, newdata=grid)
+  
+  grid_long <- pivot_longer(grid, cols=starts_with("Pred"), names_to="Model", values_to="Prediction")
+  grid_long$Model <- gsub("Pred_", "", grid_long$Model)
+  grid_long$Gene <- g
+  
+  plot_data[[g]] <- grid_long
+}
+
+df_results <- bind_rows(test_results)
+df_plot <- bind_rows(plot_data)
+```
+
+# 3. Visual Comparison of Fitted Curves
+
+```{r plot_results, fig.width=12, fig.height=10, warning=FALSE}
+ggplot() +
+  # Raw data
+  geom_point(data = df_long, aes(x = Age, y = Expression, color = Subject), alpha = 0.2) +
+  # Fitted lines
+  geom_line(data = df_plot, aes(x = Age, y = Prediction, linetype = Model), linewidth = 1.2, color = "black") +
+  facet_wrap(~Gene, scales = "free_y", ncol = 2) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(title = "Model Fits: Linear vs Natural Spline vs GAMM",
+       subtitle = "Black lines represent the population-level predictions (marginalizing over Subject)",
+       y = "Expression") +
+  scale_linetype_manual(values = c("Linear" = "dotted", "NS_df3" = "dashed", "GAM" = "solid"))
+```
+
+### Observations from Plots:
+1.  **Gene 1 (Linear):** Both `NS_df3` and `GAM` perfectly recover the linear relationship without noticeably overfitting the noise.
+2.  **Gene 2 (One Bend):** `NS_df3` and `GAM` both capture the quadratic peak beautifully. The linear model completely fails.
+3.  **Gene 3 (Complex):** The `GAM` captures the full sine wave. `NS_df3` struggles because it is constrained to only 3 degrees of freedom.
+4.  **Gene 4 (Flat/Null):** The `GAM` shrinks perfectly to a flat line. The `NS_df3` shows slight wiggles as it attempts to fit noise, illustrating the mild overfitting risk.
+5.  **Gene 5 (Sharp Step):** Both spline methods struggle with pure discontinuities. `NS_df3` tends to "smooth out" the sharp jump significantly, whereas `GAMM` adapts a bit better by using more degrees of freedom but still can't form a perfect step function.
+6.  **Gene 6 (High Frequency):** `NS_df3` severely underfits this rapid oscillation because 3 degrees of freedom simply cannot capture that many bends. `GAMM` captures it successfully.
+
+# 4. Hypothesis Testing Comparison
+
+```{r hypothesis_testing}
+kable(df_results, digits = 5, format.args = list(scientific = TRUE), 
+      caption = "P-values: Significance of Age Effect")
+```
+
+### Statistical Observations:
+*   The likelihood ratio test correctly protects the `NS_df3` from false positives on Gene 4 despite visual wiggles.
+*   `NS_df3` detects the true effect robustly even when it partially underfits (Gene 3, Gene 5, Gene 6), though with slightly less power than `GAMM` in cases where 3 df is a poor fit.
+
+# 5. Variance Partitioning Comparison
+
+Here we implement the "Realized Predictions" variance partitioning approach for all three models to see how much variance they attribute to `Age` vs `Subject` vs `Residuals`. This allows us to see how the mathematical constraints of each model impact the final variance fractions.
+
+```{r variance_partitioning, fig.width=14, fig.height=8, warning=FALSE}
+calc_vp <- function(model, model_type = "lmer") {
+  if (model_type == "lmer") {
+    # Extract fixed effects variance
+    X <- getME(model, "X")
+    beta <- fixef(model)
+    # Remove intercept
+    non_int <- colnames(X) != "(Intercept)"
+    X_fixed <- X[, non_int, drop=FALSE]
+    beta_fixed <- beta[non_int]
+    
+    # Calculate realized prediction variance for fixed effects (Age)
+    pred_fixed <- as.numeric(X_fixed %*% beta_fixed)
+    var_age <- var(pred_fixed)
+    if (is.na(var_age)) var_age <- 0
+    
+    # Extract random effects variance (Subject)
+    Z <- getME(model, "Z")
+    b <- getME(model, "b")
+    pred_subj <- as.numeric(Z %*% b)
+    var_subj <- var(pred_subj)
+    
+    var_resid <- sigma(model)^2
+    
+    total <- var_age + var_subj + var_resid
+    return(data.frame(Age = var_age/total*100, Subject = var_subj/total*100, Residual = var_resid/total*100))
+    
+  } else if (model_type == "gamm") {
+    mer_obj <- model$mer
+    # Fixed effects (linear part of spline)
+    X <- getME(mer_obj, "X")
+    beta <- fixef(mer_obj)
+    
+    spline_fixed_name <- "Xs(Age)Fx1"
+    
+    if (spline_fixed_name %in% colnames(X)) {
+       pred_lin <- as.numeric(X[, spline_fixed_name, drop=FALSE] %*% beta[spline_fixed_name])
+    } else {
+       pred_lin <- rep(0, nrow(X))
+    }
+    
+    # Random effects (Subject and non-linear spline)
+    Z <- getME(mer_obj, "Z")
+    b <- getME(mer_obj, "b")
+    gp <- getME(mer_obj, "Gp")
+    names_re <- names(ranef(mer_obj))
+    
+    pred_nonlin <- rep(0, nrow(Z))
+    var_subj <- 0
+    
+    for (i in seq_along(names_re)) {
+      start <- gp[i] + 1
+      end <- gp[i+1]
+      Z_grp <- Z[, start:end, drop = FALSE]
+      b_grp <- b[start:end]
+      pred_grp <- as.numeric(Z_grp %*% b_grp)
+      
+      if (names_re[i] == "Xr") {
+        pred_nonlin <- pred_grp
+      } else if (names_re[i] == "Subject") {
+        var_subj <- var(pred_grp)
+      }
+    }
+    
+    # Correct calculation: Combine linear and non-linear predictions before variance
+    pred_age_total <- pred_lin + pred_nonlin
+    var_age <- var(pred_age_total)
+    
+    var_resid <- sigma(mer_obj)^2
+    total <- var_age + var_subj + var_resid
+    return(data.frame(Age = var_age/total*100, Subject = var_subj/total*100, Residual = var_resid/total*100))
+  }
+}
+
+vp_results <- list()
+for (g in genes) {
+  mods <- models_cache[[g]]
+  
+  vp_lin <- calc_vp(mods$lin, "lmer") %>% mutate(Model = "Linear", Gene = g)
+  vp_ns <- calc_vp(mods$ns, "lmer") %>% mutate(Model = "NS_df3", Gene = g)
+  vp_gam <- calc_vp(mods$gam, "gamm") %>% mutate(Model = "GAMM", Gene = g)
+  
+  vp_results[[g]] <- bind_rows(vp_lin, vp_ns, vp_gam)
+}
+
+df_vp <- bind_rows(vp_results) %>% 
+  pivot_longer(cols = c("Age", "Subject", "Residual"), names_to = "Component", values_to = "Pct_Explained")
+
+# Plot Variance Partitioning
+ggplot(df_vp, aes(x = Model, y = Pct_Explained, fill = Component)) +
+  geom_bar(stat = "identity", position = "stack", color = "black", alpha = 0.9) +
+  facet_wrap(~Gene, ncol = 3) +
+  scale_fill_manual(values = c("Age" = "#fc8d62", "Subject" = "#8da0cb", "Residual" = "#e78ac3")) +
+  theme_minimal(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Variance Partitioning Comparison", y = "% Variance Explained")
+```
+
+### Variance Partitioning Observations:
+1.  **Linear Data (Gene 1):** All three methods accurately attribute similar amounts of variance to Age.
+2.  **Non-Linear Data (Gene 2, 3, 5, 6):** `Linear` severely underestimates the variance explained by Age because it cannot fit the curve. The missed variance is dumped into the `Residual`.
+3.  **GAMM vs NS_df3:** Because `GAMM` uses more degrees of freedom, it explains slightly more variance in complex curves (Gene 3, Gene 6). `NS_df3` explains less variance in these cases because it underfits, transferring the unexplained variance to `Residuals`.
+4.  **Flat Data (Gene 4):** All models correctly identify that Age explains ~0% of the variance, emphasizing that standard `lme4` variance partitioning with `ns()` successfully handles the prediction matrix without inflating the fraction of variance explained.
+
+# 6. Conclusion
+*   **GAMM (`gamm4`):** The most flexible and statistically complete method for partitioning variance in complex trajectories, but very slow.
+*   **Natural Spline (`ns(df=3)`):** An excellent, ultra-fast alternative. While it may struggle visually on very sharp discontinuities or highly complex waves (Genes 5 and 6), it performs comparably to GAMM on standard non-linear biology (Gene 2) and calculates variance fractions robustly using standard mixed model frameworks.
