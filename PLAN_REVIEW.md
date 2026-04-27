@@ -86,23 +86,23 @@ If adopting the `ns()` approach, the pipeline simplifies drastically:
 To illustrate the stark computational differences between these approaches, consider the following study design:
 *   **Dataset:** 115 Subjects × 6 longitudinal samples = **690 Total Samples**
 *   **Transcriptome:** ~15,000 Genes
-*   **Model Formula:** `~ (1|Subject.ID) + sex.numeric + (1|RNA.isolation.Batch) + (1|Lib_prep_batches) + (1|Year.Drawn) + [Age Term] + RIN + mk_dup.PERCENT_DUPLICATION + star.uniquely_mapped_percent + cellfreqs`
+*   **Model Formula:** `~ (1|Subject.ID) + sex.numeric + (1|RNA.isolation.Batch) + (1|Lib_prep_batches) + (1|Year.Drawn) + [Age Term] + RIN + mk_dup.PERCENT_DUPLICATION + star.uniquely_mapped_percent + cellfreq1 + cellfreq2 + cellfreq3 + cellfreq4 + cellfreq5`
 
-This is a highly complex model with **4 distinct random intercepts** and several continuous/categorical fixed effects.
+This is a highly complex model with **4 distinct random intercepts** and **10 continuous/categorical fixed effects** (including the 5 cell frequencies).
 
 ### A. Linear Model (`Age.months`)
 *   **Mechanics:** Fits standard `lmer` models via `variancePartition::dream` (which uses parallelization). 
-*   **Speed:** Extremely fast. ~0.2 – 0.5 seconds per gene per core.
+*   **Speed:** Very fast. The 10 fixed effects slightly increase the size of the design matrix $X$, but fixed-effect estimation is computationally cheap in `lme4`. ~0.3 – 0.6 seconds per gene per core.
 *   **Estimated Total Runtime (8 Cores):** **~10 to 20 minutes**.
 
 ### B. Natural Splines (`ns(Age.months, df=3)`)
-*   **Mechanics:** Fits standard `lmer` models, but with 2 additional columns in the fixed effects design matrix. The underlying optimization is practically identical to the linear model.
-*   **Speed:** ~0.3 – 0.6 seconds per gene per core.
+*   **Mechanics:** Fits standard `lmer` models, adding 2 additional columns to the fixed effects design matrix (total 12 fixed effects). The underlying REML optimization for the 4 random intercepts is practically identical to the linear model.
+*   **Speed:** ~0.4 – 0.8 seconds per gene per core.
 *   **Estimated Total Runtime (8 Cores):** **~15 to 25 minutes**.
 
 ### C. Penalized GAMM (`gamm4` with `s(Age.months, bs='cr')`)
-*   **Mechanics:** `gamm4` translates the smoothing penalty into a variance component and iteratively calls `lmer` / `optim` to find the optimal smoothing parameter. For a dataset with 690 samples and 4 *other* random intercepts to juggle simultaneously, the optimization surface is highly complex.
-*   **Speed:** Conservatively 10 to 30 seconds per gene per core (could be much worse for genes that struggle to converge).
+*   **Mechanics:** `gamm4` translates the smoothing penalty into a 5th variance component and iteratively calls `lmer` / `optim` to find the optimal smoothing parameter. Juggling 4 random intercepts *plus* the smoothing penalty across 690 samples creates a highly complex, multidimensional optimization surface.
+*   **Speed:** Conservatively 10 to 30 seconds per gene per core (could be much worse for genes that struggle to converge due to the high number of covariates).
 *   **Estimated Total Runtime (8 Cores):** **~8 to 15 hours**.
 
 **Verdict:** The `ns(df=3)` approach provides the ability to model non-linear age trajectories with virtually zero computational penalty compared to a standard linear model, whereas the `gamm4` approach turns a quick coffee-break analysis into an overnight compute job.
