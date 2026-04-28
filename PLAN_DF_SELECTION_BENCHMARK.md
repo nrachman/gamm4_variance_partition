@@ -38,11 +38,11 @@ We will test two families of splines across 10 levels of complexity:
 
 To select the winning model, we will evaluate the tournament results across three distinct axes: Statistical Fit, Variance Robustness, and Inference Robustness.
 
-### Metric A: Statistical Fit and Parsimony (AIC / BIC)
+### Metric A: Statistical Fit and Parsimony (AIC)
 We must balance the model's ability to fit the data against the penalty for adding unnecessary complexity.
-*   **Akaike Information Criterion (AIC):** Good for predictive models, but tends to favor slightly more complex models.
-*   **Bayesian Information Criterion (BIC):** Penalizes extra parameters more heavily than AIC. In high-dimensional omics data with limited sample sizes (6 per subject), BIC is strongly preferred to protect against overfitting.
-*   **Benchmark Output:** A bar chart showing the percentage of the 500 genes that achieved their minimum BIC at each `df` (1 through 10) for both `ns` and `lspline`. The peak of this distribution defines our Global Empirical Prior.
+*   **Akaike Information Criterion (AIC):** This will be our primary metric. AIC penalizes model complexity less harshly than BIC. In this specific context, we explicitly favor AIC to ensure we err on the side of assigning *too much* variation to Age rather than too little. This addresses specific reviewer skepticism regarding whether Subject identity truly explains more variation than developmental Age.
+*   **Bayesian Information Criterion (BIC):** We will calculate BIC for reference, but it will not be the primary decision driver due to its aggressive penalty for complexity.
+*   **Benchmark Output:** A bar chart showing the percentage of the 500 genes that achieved their minimum AIC at each `df` (1 through 10) for both `ns` and `lspline`. The peak of this distribution defines our Global Empirical Prior.
 
 ### Metric B: Robustness of Subject Identity (Variance and Effect Sizes)
 A critical danger of overfitting the Age term is "variance stealing." If a spline becomes too wiggly (e.g., `lspline(n=10)`), it may begin fitting random noise that actually belongs to the subject's unique baseline.
