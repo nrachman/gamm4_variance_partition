@@ -44,17 +44,20 @@ We must balance the model's ability to fit the data against the penalty for addi
 *   **Bayesian Information Criterion (BIC):** Penalizes extra parameters more heavily than AIC. In high-dimensional omics data with limited sample sizes (6 per subject), BIC is strongly preferred to protect against overfitting.
 *   **Benchmark Output:** A bar chart showing the percentage of the 500 genes that achieved their minimum BIC at each `df` (1 through 10) for both `ns` and `lspline`. The peak of this distribution defines our Global Empirical Prior.
 
-### Metric B: Robustness of Subject Variance
-A critical danger of overfitting the Age term is "variance stealing." If a spline becomes too wiggly (e.g., `lspline(n=10)`), it may begin fitting random noise that actually belongs to the subject's unique baseline or residual error.
-*   **Analysis:** For each gene, we will extract the Percentage of Variance Explained by `Subject.ID` across all 20 models using `variancePartition::extractVarPart`.
-*   **Benchmark Output:** A line plot tracking the median Subject Variance (across the 500 genes) as a function of spline complexity (df 1-10). 
-*   **Interpretation:** A robust spline method will show a stabilization of Subject Variance. If Subject Variance drops precipitously as `df` increases, the spline is structurally overfitting and absorbing individual-level biological variation.
+### Metric B: Robustness of Subject Identity (Variance and Effect Sizes)
+A critical danger of overfitting the Age term is "variance stealing." If a spline becomes too wiggly (e.g., `lspline(n=10)`), it may begin fitting random noise that actually belongs to the subject's unique baseline.
+*   **Analysis:** For each gene, we will extract the Percentage of Variance Explained by `Subject.ID` using `variancePartition::extractVarPart`, as well as the actual effect size estimates (BLUPs - Best Linear Unbiased Predictors) for the `Subject.ID` random intercepts.
+*   **Benchmark Output:** A line plot tracking the median Subject Variance (across the 500 genes) as a function of spline complexity (df 1-10), and a measure of BLUP stability (e.g., correlation of Subject effects between df=2 and df=10).
+*   **Interpretation:** A robust spline method will show stabilization. If Subject Variance drops precipitously as `df` increases, or if the subject-specific BLUPs become highly volatile, the spline is structurally overfitting and absorbing individual-level biological identity.
 
-### Metric C: Robustness of Effect Size Estimates
-The choice of Age modeling should not wildly destabilize the inference of other fixed effects (e.g., `sex`, `cellfreqs`).
-*   **Analysis:** We will track the estimated coefficient (log-fold change) and p-value of a stable covariate (e.g., `sex`) across the 20 models.
-*   **Benchmark Output:** Variance/Standard Deviation of the `sex` log-fold change estimates across the `df` spectrum.
-*   **Interpretation:** A biologically appropriate spline will cleanly regress out the age effect, leaving the `sex` effect stable. A highly volatile `sex` effect indicates the spline is introducing collinearity or structural instability into the design matrix.
+### Metric C: Robustness of Inference (Age P-values and Covariate Stability)
+We need to understand how the choice of spline impacts our statistical power to detect Age effects, and ensure it doesn't destabilize the rest of the model.
+*   **Analysis (Age P-values):** We will perform joint F-tests (ANOVA) on the spline terms across all models to extract the overarching p-value for the Age effect. We will track how the number of "significant" age-associated genes changes as complexity increases.
+*   **Analysis (Covariate Stability):** We will track the estimated coefficient (log-fold change) and p-value of a stable covariate (e.g., `sex`) across the 20 models.
+*   **Benchmark Output:** 
+    1. A plot showing the distribution of Age p-values (or the count of significant genes at FDR < 0.05) across the `df` spectrum.
+    2. Variance/Standard Deviation of the `sex` log-fold change estimates across the models.
+*   **Interpretation:** As `df` increases, power to detect true Age effects may dilute because the test is penalized for the extra degrees of freedom. We want to find the "sweet spot" of maximum power. Additionally, a highly volatile `sex` effect indicates the spline is introducing collinearity or structural instability into the design matrix.
 
 ---
 
